@@ -18,6 +18,7 @@
 #include "fairport/pst.h"
 
 #pragma comment( compiler )
+#pragma comment( user, "PstReader v0.2 compiled on " __DATE__ " at " __TIME__ )
 
 class CTimer{
 	__int64	m_ticksStart;
@@ -68,6 +69,7 @@ private:
 	std::string m_strPST; // path to PST
 	std::string m_strdgpreamble;
 	std::string m_strmsgpreamble;
+	std::ostringstream m_ostrOut;
 	std::regex m_rxFolder;
 	std::regex m_rxExtn;
 	// Options
@@ -76,7 +78,7 @@ private:
 	bool m_bDoFireForget;
 	// Statistics
 	unsigned long m_sentBytes;
-	unsigned long m_nProcessed; // Number processed sucessfully
+	unsigned long m_nProcessed; // Number processed successfully
 	unsigned long m_nProcFail; // Number which failed to process due to missing keys etc..
 	unsigned long m_nSuccess;
 	unsigned long m_nFail;
@@ -185,7 +187,7 @@ private:
 			m_nAttFailed++;
 		}
 	}
-	bool SubmitMessage(const std::ostringstream& strBodyStrm, const std::string& strID)
+	bool SubmitMessage(const std::ostringstream& ostrBody ) 
 	{
 		using boost::asio::ip::tcp;
 		// Submits a well-formed message to Solr service
@@ -207,7 +209,7 @@ private:
 		while (error && endpoint_iterator != end)
 	    {
 			socket.close();
-			boost::asio::connect(socket, endpoint_iterator,error);
+			boost::asio::connect(socket, endpoint_iterator++,error);
 			//socket.connect(*endpoint_iterator++, error);
 		}
 		//boost::asio::connect(socket, endpoint_iterator,error);
@@ -221,8 +223,8 @@ private:
 		boost::asio::streambuf request;
 		std::ostream request_stream(&request);	
 		request_stream << m_strdgpreamble;
-		std::string strBody = strBodyStrm.str();
-		strBody.resize(strBody.length()-1); // strip terminating null
+		std::string strBody = ostrBody.str();
+		//strBody.resize(strBody.length()-1); // strip terminating null
 		request_stream << "Content-Length: " << strBody.length() << "\r\n";
 		request_stream << (m_bDoFireForget?"Connection: keep-alive\r\n":"Connection: close\r\n");		
 		request_stream << "\r\n" << strBody;
@@ -292,7 +294,7 @@ private:
 			while (boost::asio::read(socket, response,boost::asio::transfer_at_least(1), error))
 				std::cerr << &response;
 
-			std::cerr << std::endl << "Msg ID : " << strID << std::endl;
+			//std::cerr << std::endl << "Msg ID : " << strID << std::endl;
 			std::cerr << strBody << std::endl;
 			m_nFail++;
 			socket.close();
@@ -308,7 +310,7 @@ private:
 		{
 			std::ostringstream ostrOut;
 			ostrOut << "<commit/> ";
-			SubmitMessage(ostrOut,"Null");
+			SubmitMessage(ostrOut);
 		}
 	}
 public:
@@ -325,7 +327,9 @@ public:
 			  	"POST " + path + " HTTP/1.1\r\n" + 
 				"Host: " + m_strHost + ":" + m_strPort + "\r\n" +
 				"Content-Type: text/xml\r\n";
-		m_strmsgpreamble="<add commitWithin=\"" + timeout_ms + "\"><doc><field name=\"id\">";
+		m_strmsgpreamble="<add commitWithin=\"" + timeout_ms + "\">";
+
+	m_ostrOut << m_strmsgpreamble;
 		
 		if(ext!="")
 			{
@@ -344,10 +348,10 @@ public:
 	{
 		// Process an entire message
 		// Rather than amend Fairport, in most cases I've used the relevant property ID where a native Fairport accessor doesn't exist
-		std::ostringstream ostrOut, ostrID;
+		std::ostringstream ostrID; // m_ostrOut, 
 		std::string strID;
 		try {
-			ostrOut << m_strmsgpreamble;
+			m_ostrOut << "<doc><field name=\"id\">"; //m_strmsgpreamble;
 			if(attachmentid!="")
 			{
 				strID=attachmentid;
@@ -361,7 +365,7 @@ public:
 				strID=ostrID.str();
 			}
 			// Parent PST file
-			ostrOut << strID << "</field><field name=\"pstfile\">" << m_strPST;
+			m_ostrOut << strID << "</field><field name=\"pstfile\">" << m_strPST;
 
 			// Occasionally in messages as attachments the creation time and sender don't exist.
 			// For these cases we use the parent's creation time and an empty sender
@@ -371,7 +375,7 @@ public:
 			else
 				tmDate=to_tm(m.get_delivery_time());
 			// Creation time, as YYYY-MM-DDTHH:mm:ssZ datetime 
-			ostrOut << "</field><field name=\"created\">"
+			m_ostrOut << "</field><field name=\"created\">"
 				<< std::dec << std::setw(4) << 1900+tmDate.tm_year << "-" << std::setw(2) << std::setfill('0') << 1+tmDate.tm_mon << "-" // 0-11, need to add one
 				<< std::setw(2) << std::setfill('0') << tmDate.tm_mday << "T" << std::setw(2) << std::setfill('0') << tmDate.tm_hour << ":"
 				<< std::setw(2) << std::setfill('0') << tmDate.tm_min << ":" << std::setw(2) << std::setfill('0') << tmDate.tm_sec << "Z";
@@ -382,7 +386,7 @@ public:
 				strSender="Missing";
 			else
 				strSender=CleanString(m.get_property_bag().read_prop<std::string>(0x0C1A));
-			ostrOut << "</field><field name=\"sender\">" << strSender;
+			m_ostrOut << "</field><field name=\"sender\">" << strSender;
 
 			// Subject, as ASCII string (or "Empty")
 			std::string strSubj="Empty";
@@ -392,25 +396,26 @@ public:
 				if(strSubj.size() && strSubj[0] == fairport::message_subject_prefix_lead_byte) strSubj=strSubj.substr(2);
 				strSubj=CleanString(strSubj);
 			}
-			ostrOut << "</field><field name=\"subject\">" << strSubj;
+			m_ostrOut << "</field><field name=\"subject\">" << strSubj;
 
 			// Full set of recipients
 			std::string strRecipients;
-			ostrOut << "</field><field name=\"to\">";
+			m_ostrOut << "</field><field name=\"to\">";
 			for(fairport::message::recipient_iterator ri=m.recipient_begin();ri!=m.recipient_end();++ri)
 			{
 				strRecipients+=ri->get_property_row().read_prop<std::string>(0x3001);
 				strRecipients+=" ;"; // get_name()
 			}
-			ostrOut << CleanString(strRecipients); // occasionally contain non-XML compliant characters
+			m_ostrOut << CleanString(strRecipients); // occasionally contain non-XML compliant characters
 
 			// Number of attachments
 			size_t nAttach=m.get_attachment_count();
 			m_nAttachments+=nAttach;
-			ostrOut << "</field><field name=\"attachments\">" << nAttach;
+			m_ostrOut << "</field><field name=\"attachments\">" << nAttach;
 
 			// Filenames of attachments (where possible)
 			std::string strAttach;
+			bool bHasEmbeddedMsg=false;
 			if(nAttach==0)
 			{
 				strAttach="None";
@@ -424,10 +429,9 @@ public:
 					if (ai->is_message())
 					{
 						m_nMsgAttachment++;
-						fairport::message msg=ai->open_as_message();
 						// Mostly this is null, but occasionally not. For uniformity, keep consistent naming
 						strFilename=strID + ".att(" + std::to_string((_Longlong)i) + ")";
-						ProcessMessage(msg,strFilename,&tmDate);
+						bHasEmbeddedMsg=true;
 					}
 					else
 					{
@@ -445,20 +449,30 @@ public:
 					i++;
 				}
 			}
-			ostrOut << "</field><field name=\"filenames\">" << CleanString(strAttach);
+			m_ostrOut << "</field><field name=\"filenames\">" << CleanString(strAttach);
 
 			// IPM class of message. 
-			ostrOut << "</field><field name=\"class\">" << m.get_property_bag().read_prop<std::string>(0x001A);
+			m_ostrOut << "</field><field name=\"class\">" << m.get_property_bag().read_prop<std::string>(0x001A);
 
 			// ASCII string of body text, or "Empty" if not available
 			std::string strBody = "Empty";
 			if (m.has_body()) strBody = CleanString(m.get_property_bag().read_prop<std::string>(0x1000));
-			//if(strBody.length()>32767) strBody="TRUNCATED";
-			ostrOut << "</field><field name=\"body\">" << strBody;
-			ostrOut << "</field></doc></add>" << std::ends;
+			m_ostrOut << "</field><field name=\"body\">" << strBody;
+			m_ostrOut << "</field></doc>";// << std::ends;
 			m_nProcessed++;
-			// Send to server
-			return (m_bSubmitToSearch?SubmitMessage(ostrOut,strID):true);
+			int i=1;
+			if(!bHasEmbeddedMsg)return true;
+			for(fairport::message::attachment_iterator ai=m.attachment_begin();ai!=m.attachment_end();++ai)
+			{
+				if (ai->is_message())
+				{
+					fairport::message msg=ai->open_as_message();
+					ProcessMessage(msg,strID + ".att(" + std::to_string((_Longlong)i) + ")",&tmDate);
+				}
+				i++;
+			}
+			return true;
+			//return (m_bSubmitToSearch?SubmitMessage(m_ostrOut,strID):true);
 		}
 		catch(fairport::key_not_found<fairport::prop_id>&a)
 		{
@@ -480,16 +494,28 @@ public:
 		int k=indent;
 		std::string strIndent;
 		while(--k)strIndent+="  ";
-		std::cout << strIndent << name << " (" << f.get_message_count() << " items)\n";
+		size_t iMax=f.get_message_count();
+		std::cout << strIndent << name << " (" << iMax << " items)\n";
 		if(!m_bDoFolderRE||std::regex_search(strFolder,m_rxFolder))
 		{
-			int i=0,j=0;
+			size_t i=0,j=0;
 			CTimer oTimer;
 			oTimer.Start();
 			for(fairport::folder::message_iterator mi=f.message_begin();mi!=f.message_end();++mi)
 			{
-				if(ProcessMessage(*mi))j++;
+				ProcessMessage(*mi);
 				i++;
+				if(m_bSubmitToSearch&&(i%20==0||i==iMax))
+				{
+					m_ostrOut << "</add>";
+					if(SubmitMessage(m_ostrOut))
+					{
+						if(i==iMax)j+=iMax%20;
+						else j+=20;
+					}
+					std::ostringstream().swap(m_ostrOut);
+					m_ostrOut << m_strmsgpreamble;
+				}
 				if(i%100==0)
 				{
 					std::cout << strIndent << i << " messages processed\t\t\r";
@@ -522,7 +548,7 @@ public:
 			std::cout << std::endl << std::endl
 				<< "Total time: " << oTimer.Seconds() << " seconds" << std::endl
 				<< "Folders traversed: " << m_nFolders << std::endl
-				<< "Messages sucessfully processed (of which are embedded attachments): " << m_nProcessed << " (" << m_nMsgAttachment << ")" << std::endl
+				<< "Messages successfully processed (of which are embedded attachments): " << m_nProcessed << " (" << m_nMsgAttachment << ")" << std::endl
 				<< "Messages failed to process: " << m_nProcFail << std::endl
 				<< "Successfully submitted: " << (m_nSuccess==0?0:m_nSuccess-m_nFolders) << std::endl // Each folder comes with a "commit" submission
 				<< "Failed to submit: " << m_nFail << std::endl
